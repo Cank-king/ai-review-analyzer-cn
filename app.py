@@ -2,6 +2,9 @@
 
 import io
 import json
+import ast
+import html
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +14,83 @@ import streamlit as st
 from analyzer import analyze_reviews, generate_ai_business_report, generate_business_report
 
 
+REPORT_LABELS = ("问题", "严重程度", "建议动作", "优先原因", "为什么优先处理")
+
+
+def _format_text_line(line):
+    """转义文本，并将整改事项中的字段标签加粗。"""
+    escaped = html.escape(str(line), quote=True)
+    for label in REPORT_LABELS:
+        escaped = re.sub(rf"^({re.escape(label)}：)", r"<strong>\1</strong>", escaped)
+    return escaped
+
+
+def format_report_content(content):
+    """把模型可能返回的 list、dict、string 安全转换为可读 HTML。"""
+    if isinstance(content, dict):
+        items = []
+        for key, value in content.items():
+            items.append(f"<li><strong>{html.escape(str(key))}</strong>：{format_report_content(value)}</li>")
+        return "<ul>" + "".join(items) + "</ul>" if items else "<span>暂无内容</span>"
+    if isinstance(content, (list, tuple, set)):
+        items = "".join(f"<li>{format_report_content(item)}</li>" for item in content)
+        return "<ol>" + items + "</ol>" if items else "<span>暂无内容</span>"
+    if content is None:
+        return "<span>暂无内容</span>"
+
+    text = str(content).strip()
+    if text[:1] in ("[", "{") and text[-1:] in ("]", "}"):
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, json.JSONDecodeError):
+                parsed = None
+        if isinstance(parsed, (list, tuple, dict)):
+            return format_report_content(parsed)
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "<span>暂无内容</span>"
+    list_items = []
+    normal_lines = []
+    for line in lines:
+        match = re.match(r"^(?:[-*]|\d+[.)])\s*(.+)$", line)
+        if match:
+            list_items.append(_format_text_line(match.group(1)))
+        else:
+            normal_lines.append(_format_text_line(line))
+    parts = []
+    if normal_lines:
+        parts.append("<br>".join(normal_lines))
+    if list_items:
+        parts.append("<ol>" + "".join(f"<li>{item}</li>" for item in list_items) + "</ol>")
+    return "".join(parts)
+
+
+def format_report_markdown(content):
+    """将报告值转换为下载用 Markdown，避免出现 Python list 表示法。"""
+    if isinstance(content, dict):
+        return "\n".join(f"- **{key}**：{format_report_markdown(value)}" for key, value in content.items())
+    if isinstance(content, (list, tuple, set)):
+        return "\n".join(f"{index}. {format_report_markdown(item)}" for index, item in enumerate(content, 1))
+    if content is None:
+        return "暂无内容"
+    text = str(content).strip()
+    if text[:1] in ("[", "{") and text[-1:] in ("]", "}"):
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, json.JSONDecodeError):
+                parsed = None
+        if isinstance(parsed, (list, tuple, dict)):
+            return format_report_markdown(parsed)
+    return text
+
+
 st.set_page_config(page_title="商家评论诊断台", page_icon="🧭", layout="wide")
 st.markdown("""
 <style>
@@ -18,8 +98,12 @@ st.markdown("""
 .hero {padding: 1.4rem 1.6rem; border-radius: 18px; background: linear-gradient(120deg,#17324d,#256b70); color:white; margin-bottom:1.2rem;}
 .hero h1 {margin:0 0 .35rem 0; font-size:2rem;}
 .hero p {margin:0; opacity:.86; font-size:1rem;}
-.report-card {padding:1rem 1.15rem; border:1px solid #e6eaf0; border-radius:14px; background:#fff; min-height:125px;}
-.report-card h4 {margin:0 0 .5rem 0; color:#17324d;}
+.report-card {padding:1.15rem 1.25rem; border:1px solid #dbe3ea; border-radius:14px; background:#fff; min-height:125px; color:#334155; line-height:1.75; margin-bottom:.5rem;}
+.report-card * {color:#334155 !important;}
+.report-card h4 {margin:0 0 .65rem 0; color:#17324d !important; font-size:1.05rem;}
+.report-card strong {color:#263238 !important; font-weight:700;}
+.report-card ul, .report-card ol {margin:.35rem 0 .2rem 1.2rem; padding-left:1rem;}
+.report-card li {margin:.25rem 0;}
 </style>
 """, unsafe_allow_html=True)
 st.markdown('<div class="hero"><h1>🧭 商家评论诊断台</h1><p>把消费者反馈，整理成可以直接执行的经营决策。</p></div>', unsafe_allow_html=True)
@@ -76,7 +160,7 @@ with tab_overview:
     with col1:
         st.subheader("高频关键词")
         if result["keywords"]:
-            st.dataframe(pd.DataFrame(result["keywords"], columns=["关键词", "出现次数"]), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(result["keywords"], columns=["关键词", "出现次数"]), hide_index=True, width="stretch")
         else:
             st.write("暂未提取到有效关键词。")
     with col2:
@@ -114,7 +198,8 @@ with tab_report:
         card_cols = st.columns(2)
         for card_col, (title, content) in zip(card_cols, report_items[row_start:row_start + 2]):
             with card_col:
-                st.markdown(f'<div class="report-card"><h4>{title}</h4><div>{content}</div></div>', unsafe_allow_html=True)
+                safe_content = format_report_content(content)
+                st.markdown(f'<div class="report-card"><h4>{html.escape(str(title))}</h4><div>{safe_content}</div></div>', unsafe_allow_html=True)
         st.write("")
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report_lines = [
@@ -122,20 +207,23 @@ with tab_report:
         f"评论总数：{result['total']}", f"好评率：{positive_rate:.1f}%", f"差评率：{negative_rate:.1f}%", "",
     ]
     for title, content in business_report.items():
-        report_lines.extend([f"## {title}", "", content, ""])
+        report_lines.extend([f"## {title}", "", format_report_markdown(content), ""])
     report_markdown = "\n".join(report_lines)
-    report_csv = pd.DataFrame(list(business_report.items()), columns=["报告模块", "诊断内容"])
+    report_csv = pd.DataFrame(
+        [(title, format_report_markdown(content)) for title, content in business_report.items()],
+        columns=["报告模块", "诊断内容"],
+    )
     classified_csv = result["data"].to_csv(index=False).encode("utf-8-sig")
     download_cols = st.columns(3)
     with download_cols[0]:
-        st.download_button("下载完整诊断报告（Markdown）", report_markdown.encode("utf-8"), "merchant_review_report.md", "text/markdown", use_container_width=True)
+        st.download_button("下载完整诊断报告（Markdown）", report_markdown.encode("utf-8"), "merchant_review_report.md", "text/markdown", width="stretch")
     with download_cols[1]:
-        st.download_button("下载诊断摘要（CSV）", report_csv.to_csv(index=False).encode("utf-8-sig"), "merchant_review_report.csv", "text/csv", use_container_width=True)
+        st.download_button("下载诊断摘要（CSV）", report_csv.to_csv(index=False).encode("utf-8-sig"), "merchant_review_report.csv", "text/csv", width="stretch")
     with download_cols[2]:
         source_bytes = io.BytesIO()
         df.to_csv(source_bytes, index=False)
-        st.download_button("下载原始评论（含分类）", classified_csv, "merchant_review_classified_reviews.csv", "text/csv", use_container_width=True)
+        st.download_button("下载原始评论（含分类）", classified_csv, "merchant_review_classified_reviews.csv", "text/csv", width="stretch")
 
 with tab_data:
     st.caption(f"当前读取 {len(df):,} 条评论；仅在本页面内用于分析。")
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width="stretch")
