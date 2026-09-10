@@ -116,10 +116,7 @@ def generate_suggestions(negative_reasons):
 
 
 def generate_business_report(result):
-    """根据评论分析结果生成规则版商家诊断报告。
-
-    这是预留给后续真实 AI 接口的占位函数；当前只使用已有统计结果和规则生成文本。
-    """
+    """根据评论分析结果生成规则版正式商家诊断报告。"""
     positive_reasons = sorted(result.get("positive_reasons", []), key=lambda item: item[1], reverse=True)
     negative_reasons = sorted(result.get("negative_reasons", []), key=lambda item: item[1], reverse=True)
     suggestions = result.get("suggestions", [])
@@ -128,49 +125,49 @@ def generate_business_report(result):
     positive = int(result.get("positive", 0))
     negative = int(result.get("negative", 0))
 
-    if negative_reasons:
-        focus = "、".join(reason for reason, _ in negative_reasons[:3])
-        consumer_focus = f"消费者最关注的问题集中在：{focus}。"
-    else:
-        consumer_focus = "暂未发现集中出现的负面问题，可继续积累评论观察趋势。"
+    focus = "、".join(reason for reason, _ in negative_reasons[:5]) or "暂无集中出现的问题"
+    selling_points = "、".join(reason for reason, _ in positive_reasons[:5])
+    if not selling_points:
+        selling_points = "、".join(word for word, _ in keywords[:5]) or "暂无明确卖点"
 
-    if positive_reasons:
-        selling_points = "、".join(reason for reason, _ in positive_reasons[:3])
-        best_selling_point = f"最值得宣传的卖点是：{selling_points}。"
-    elif keywords:
-        best_selling_point = f"评论中较常出现的关注点是：{ '、'.join(word for word, _ in keywords[:3]) }，建议进一步验证其宣传价值。"
-    else:
-        best_selling_point = "暂未提取到明确卖点，建议继续收集更具体的使用体验。"
+    issue_lines = []
+    for index, (reason, count) in enumerate(negative_reasons[:5]):
+        severity = "高" if count >= 3 or (negative and count / max(negative, 1) >= 0.5) else "中"
+        action = suggestions[index] if index < len(suggestions) else "建立专项跟进和复盘机制"
+        issue_lines.append(f"- {reason}（{count}次，严重程度：{severity}）：建议动作：{action}；优先原因：该问题在差评中重复出现，直接影响购买信心。")
+    core_issues = "\n".join(issue_lines) or "- 暂无可识别的核心问题。"
 
-    if suggestions:
-        urgent_improvement = "最急需改进的事项是：" + "；".join(suggestions[:3])
-    else:
-        urgent_improvement = "当前没有明显的优先改进事项，可继续关注新评论。"
+    improvement_lines = []
+    for index, (reason, count) in enumerate(negative_reasons[:3]):
+        severity = "高" if count >= 3 else "中"
+        action = suggestions[index] if index < len(suggestions) else "安排负责人在本周内制定改进方案"
+        improvement_lines.append(f"- 问题：{reason}；严重程度：{severity}；建议动作：{action}；为什么优先处理：出现频次较高，需要先降低差评来源。")
+    priority = "\n".join(improvement_lines) or "- 暂无优先整改事项，持续观察评论变化。"
 
     if total:
         positive_rate = positive / total * 100
         negative_rate = negative / total * 100
-        summary = (
-            f"本次共分析 {total} 条评论，好评 {positive} 条（{positive_rate:.1f}%），"
-            f"差评 {negative} 条（{negative_rate:.1f}%）。"
-            "建议优先处理高频差评原因，同时放大稳定出现的正面体验。"
-        )
+        summary = f"共分析 {total} 条评论，好评率 {positive_rate:.1f}%，差评率 {negative_rate:.1f}%。建议先解决高频问题，再放大稳定的正面体验。"
     else:
+        positive_rate = negative_rate = 0
         summary = "当前没有可供分析的评论，暂时无法形成商家总结。"
 
     return {
-        "消费者最关注的问题": consumer_focus,
-        "最值得宣传的卖点": best_selling_point,
-        "最急需改进的事项": urgent_improvement,
+        "执行摘要": f"本次分析 {total} 条评论，消费者主要关注：{focus}；商家可重点宣传：{selling_points}。",
+        "核心问题 TOP 5": core_issues,
+        "消费者认可卖点 TOP 5": "、".join(reason for reason, _ in positive_reasons[:5]) or "暂无明确认可卖点。",
+        "优先整改事项 TOP 3": priority,
+        "运营/营销建议": f"围绕“{selling_points}”制作真实场景内容，展示具体体验和用户证据；对“{focus}”相关问题在详情页主动说明改进措施。",
+        "客服/售后建议": "建立差评问题标签和响应时限；客服回复时先确认问题，再给出明确处理节点，并对高频问题定期复盘。",
+        "产品优化建议": "优先围绕高频差评原因改进产品和包装，完成小批量验证后再扩大调整范围。" if negative_reasons else "继续收集具体使用场景，验证产品体验后再安排优化。",
+        "30 天行动清单": "第 1 周：确认 TOP 3 问题和负责人；第 2 周：完成客服话术、详情页和流程调整；第 3 周：验证产品或包装改进；第 4 周：复盘新评论与差评率变化。",
         "商家总结": summary,
     }
 
 
 REPORT_SECTIONS = (
-    "消费者最关注的问题",
-    "最值得宣传的卖点",
-    "最急需改进的事项",
-    "商家总结",
+    "执行摘要", "核心问题 TOP 5", "消费者认可卖点 TOP 5", "优先整改事项 TOP 3",
+    "运营/营销建议", "客服/售后建议", "产品优化建议", "30 天行动清单", "商家总结",
 )
 
 
@@ -239,10 +236,10 @@ def generate_ai_business_report(result, model="qwen-turbo", timeout=30):
         raise RuntimeError("未找到 DASHSCOPE_API_KEY")
 
     system_prompt = (
-        "你是中文电商运营分析师。请根据评论统计和评论样本，生成简洁、具体、可执行的商家诊断报告。"
+        "你是中文电商运营分析师。请根据评论统计和评论样本，生成正式、简洁、具体、可执行的商家诊断报告。"
         "只返回一个合法 JSON 对象，不要 Markdown，不要额外说明。对象必须包含四个键："
-        "消费者最关注的问题、最值得宣传的卖点、最急需改进的事项、商家总结。"
-        "每个值使用简体中文完整句子，避免编造统计中没有的信息。"
+        "执行摘要、核心问题 TOP 5、消费者认可卖点 TOP 5、优先整改事项 TOP 3、运营/营销建议、客服/售后建议、产品优化建议、30 天行动清单、商家总结。"
+        "每个值使用简体中文；核心问题和卖点最多五条，优先整改最多三条。每个优先整改事项必须包含问题、严重程度、建议动作、为什么优先处理。避免编造统计中没有的信息。"
     )
     payload = {
         "model": model,

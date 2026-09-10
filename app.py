@@ -2,6 +2,7 @@
 
 import io
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -115,20 +116,25 @@ with tab_report:
             with card_col:
                 st.markdown(f'<div class="report-card"><h4>{title}</h4><div>{content}</div></div>', unsafe_allow_html=True)
         st.write("")
-    report_lines = ["# AI 商家诊断报告", "", f"报告状态：{status}", ""]
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    report_lines = [
+        "# AI 商家诊断报告", "", f"报告状态：{status}", f"生成时间：{generated_at}",
+        f"评论总数：{result['total']}", f"好评率：{positive_rate:.1f}%", f"差评率：{negative_rate:.1f}%", "",
+    ]
     for title, content in business_report.items():
         report_lines.extend([f"## {title}", "", content, ""])
     report_markdown = "\n".join(report_lines)
     report_csv = pd.DataFrame(list(business_report.items()), columns=["报告模块", "诊断内容"])
+    classified_csv = result["data"].to_csv(index=False).encode("utf-8-sig")
     download_cols = st.columns(3)
     with download_cols[0]:
-        st.download_button("下载 Markdown 报告", report_markdown.encode("utf-8"), "商家诊断报告.md", "text/markdown", use_container_width=True)
+        st.download_button("下载完整诊断报告（Markdown）", report_markdown.encode("utf-8"), "merchant_review_report.md", "text/markdown", use_container_width=True)
     with download_cols[1]:
-        st.download_button("下载 CSV 报告", report_csv.to_csv(index=False).encode("utf-8-sig"), "商家诊断报告.csv", "text/csv", use_container_width=True)
+        st.download_button("下载诊断摘要（CSV）", report_csv.to_csv(index=False).encode("utf-8-sig"), "merchant_review_report.csv", "text/csv", use_container_width=True)
     with download_cols[2]:
         source_bytes = io.BytesIO()
         df.to_csv(source_bytes, index=False)
-        st.download_button("下载当前数据", source_bytes.getvalue(), "评论数据.csv", "text/csv", use_container_width=True)
+        st.download_button("下载原始评论（含分类）", classified_csv, "merchant_review_classified_reviews.csv", "text/csv", use_container_width=True)
 
 with tab_data:
     st.caption(f"当前读取 {len(df):,} 条评论；仅在本页面内用于分析。")
