@@ -86,6 +86,8 @@ def analyze_reviews(df, text_column, rating_column, top_n=15):
     negative_reasons = find_reasons(negative_text, NEGATIVE_RULES)
     return {
         "data": data,
+        "text_column": text_column,
+        "rating_column": rating_column,
         "total": len(data),
         "positive": int((data["_分类"] == "好评").sum()),
         "negative": int((data["_分类"] == "差评").sum()),
@@ -94,6 +96,8 @@ def analyze_reviews(df, text_column, rating_column, top_n=15):
         "positive_reasons": positive_reasons,
         "negative_reasons": negative_reasons,
         "suggestions": generate_suggestions(negative_reasons),
+        "issue_evidence": build_issue_evidence(data, text_column, negative_reasons),
+        "selling_point_evidence": build_selling_point_evidence(data, text_column, positive_reasons),
     }
 
 
@@ -113,6 +117,84 @@ def generate_suggestions(negative_reasons):
         "价格不满意": "重新评估定价与促销策略，突出产品价值并提供合理优惠。",
     }
     return [suggestions[reason] for reason, _ in sorted(negative_reasons, key=lambda x: x[1], reverse=True)]
+
+
+def _clip_review(value, limit=120):
+    text = _as_text(value).replace("\r", " ").replace("\n", " ").strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _evidence_rows(data, text_column, words, category):
+    mask = data[text_column].map(lambda value: any(word in _as_text(value) for word in words))
+    rows = data.loc[mask]
+    category_rows = rows.loc[rows["_分类"] == category]
+    return rows, category_rows
+
+
+def _severity(negative_count, negative_total, mention_count):
+    if not negative_count or not negative_total:
+        return "低"
+    share = negative_count / negative_total
+    if share >= 0.5 or negative_count >= 5:
+        return "高"
+    if share >= 0.2 or negative_count >= 2:
+        return "中"
+    return "低"
+
+
+def build_issue_evidence(data, text_column, negative_reasons):
+    """按规则从原始评论计算负面问题证据，不依赖 AI 生成数字。"""
+    negative_total = int((data["_分类"] == "差评").sum())
+    actions = {
+        "质量问题": "加强出厂质检，重点检查破损、漏水和开线等问题。",
+        "物流问题": "优化物流合作方和发货时效，并加强运输包装保护。",
+        "尺寸不合适": "完善尺寸说明、测量指引和尺码对照表。",
+        "使用体验不佳": "针对具体使用场景优化功能、噪音和操作体验。",
+        "描述不符": "核对详情页与实物，补充真实图片、参数和色差说明。",
+        "售后服务问题": "设定售后响应时限，培训客服并跟进每个问题闭环。",
+        "价格不满意": "重新评估定价和促销策略，清晰解释产品价值。",
+    }
+    evidence = []
+    rule_map = NEGATIVE_RULES
+    for issue_name, _ in negative_reasons:
+        rows, negative_rows = _evidence_rows(data, text_column, rule_map[issue_name], "差评")
+        mention_count = len(rows)
+        negative_count = len(negative_rows)
+        share = negative_count / negative_total * 100 if negative_total else None
+        severity = _severity(negative_count, negative_total, mention_count)
+        if negative_total < 3:
+            severity = "样本不足"
+        evidence.append({
+            "issue_name": issue_name,
+            "mention_count": mention_count,
+            "negative_count": negative_count,
+            "negative_share": share,
+            "severity": severity,
+            "evidence": [_clip_review(value) for value in negative_rows[text_column].head(3)],
+            "recommended_action": actions.get(issue_name, "建立专项跟进和复盘机制。"),
+            "reason": "该问题在差评中重复出现，直接影响购买信心。" if negative_count else "当前没有足够的负面样本支持优先处理。",
+            "commercial_impact": "可能导致转化下降、退款增加和口碑扩散。" if negative_count else "暂未观察到明确商业影响。",
+        })
+    return evidence
+
+
+def build_selling_point_evidence(data, text_column, positive_reasons):
+    """按规则从原始评论计算正面卖点证据。"""
+    positive_total = int((data["_分类"] == "好评").sum())
+    evidence = []
+    for point_name, _ in positive_reasons:
+        words = POSITIVE_RULES[point_name]
+        rows, positive_rows = _evidence_rows(data, text_column, words, "好评")
+        positive_count = len(positive_rows)
+        share = positive_count / positive_total * 100 if positive_total else None
+        evidence.append({
+            "point_name": point_name,
+            "mention_count": len(rows),
+            "positive_count": positive_count,
+            "positive_share": share,
+            "evidence": [_clip_review(value) for value in positive_rows[text_column].head(2)],
+        })
+    return evidence
 
 
 def generate_business_report(result):
@@ -190,13 +272,16 @@ def _load_dashscope_api_key():
 
 
 def _report_input(result, max_reviews=80):
-    """整理发送给模型的统计和评论，限制评论数量以控制成本。"""
-    data = result.get("data")
-    reviews = []
-    if data is not None:
-        text_column = next((column for column in data.columns if column not in {"_评分", "_分类"}), None)
-        if text_column:
-            reviews = [str(text) for text in data[text_column].dropna().tolist() if str(text).strip()][:max_reviews]
+    """整理发送给模型的统计和代表性证据，避免按评论总量线性增加 token。"""
+    issue_evidence = result.get("issue_evidence", [])
+    selling_evidence = result.get("selling_point_evidence", [])
+    evidence_reviews = []
+    for item in issue_evidence:
+        evidence_reviews.extend(item.get("evidence", []))
+    for item in selling_evidence:
+        evidence_reviews.extend(item.get("evidence", []))
+    # 去重并限制数量；原文来自程序筛选的真实 CSV 评论。
+    evidence_reviews = list(dict.fromkeys(evidence_reviews))[:max_reviews]
     return {
         "统计": {
             "评论总数": result.get("total", 0),
@@ -206,8 +291,10 @@ def _report_input(result, max_reviews=80):
             "高频关键词": result.get("keywords", []),
             "好评原因": result.get("positive_reasons", []),
             "差评原因": result.get("negative_reasons", []),
+            "问题证据": issue_evidence,
+            "卖点证据": selling_evidence,
         },
-        "评论样本": reviews,
+        "代表性评论证据": evidence_reviews,
     }
 
 

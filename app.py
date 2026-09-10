@@ -91,6 +91,42 @@ def format_report_markdown(content):
     return text
 
 
+def _pick_column(columns, names, fallback):
+    """按常见中英文列名自动选择，仍保留页面下拉选择器供用户调整。"""
+    normalized = {str(column).strip().lower(): column for column in columns}
+    for name in names:
+        if name.lower() in normalized:
+            return columns.index(normalized[name.lower()])
+    return fallback
+
+
+def _percent(value):
+    return "样本不足" if value is None else f"{value:.1f}%"
+
+
+def _evidence_card(item, is_issue=True):
+    if is_issue:
+        title = item["issue_name"]
+        metrics = f"涉及评论：{item['mention_count']} 条 · 负面评论：{item['negative_count']} 条 · 占差评：{_percent(item['negative_share'])}"
+        details = (
+            f"严重程度：{item['severity']}<br>"
+            f"商业影响：{html.escape(item['commercial_impact'])}<br>"
+            f"建议动作：{html.escape(item['recommended_action'])}<br>"
+            f"优先原因：{html.escape(item['reason'])}"
+        )
+    else:
+        title = item["point_name"]
+        metrics = f"提及次数：{item['mention_count']} 次 · 正面评论：{item['positive_count']} 条 · 占好评：{_percent(item['positive_share'])}"
+        details = ""
+    quotes = item.get("evidence", [])
+    quote_html = format_report_content(quotes) if quotes else "<span>暂无代表性评论（样本不足）</span>"
+    return (
+        f'<div class="evidence-card"><h5>{html.escape(title)}</h5>'
+        f'<div class="evidence-metrics">{html.escape(metrics)}</div>'
+        f'<div>{details}</div><div class="evidence-label">代表性评论</div>{quote_html}</div>'
+    )
+
+
 st.set_page_config(page_title="商家评论诊断台", page_icon="🧭", layout="wide")
 st.markdown("""
 <style>
@@ -104,6 +140,11 @@ st.markdown("""
 .report-card strong {color:#263238 !important; font-weight:700;}
 .report-card ul, .report-card ol {margin:.35rem 0 .2rem 1.2rem; padding-left:1rem;}
 .report-card li {margin:.25rem 0;}
+.evidence-basis, .evidence-card {padding:1rem 1.15rem; border:1px solid #dbe3ea; border-radius:12px; background:#f8fafc; color:#334155; line-height:1.7; margin:.6rem 0;}
+.evidence-basis *, .evidence-card * {color:#334155 !important;}
+.evidence-basis h4, .evidence-card h5 {margin:0 0 .35rem 0; color:#17324d !important;}
+.basis-note, .evidence-metrics, .evidence-label {font-size:.9rem; color:#475569 !important;}
+.evidence-label {font-weight:700; margin-top:.35rem;}
 </style>
 """, unsafe_allow_html=True)
 st.markdown('<div class="hero"><h1>🧭 商家评论诊断台</h1><p>把消费者反馈，整理成可以直接执行的经营决策。</p></div>', unsafe_allow_html=True)
@@ -129,8 +170,8 @@ if df.empty:
     st.stop()
 
 columns = list(df.columns)
-default_text = columns.index("评论内容") if "评论内容" in columns else 0
-default_rating = columns.index("评分") if "评分" in columns else min(1, len(columns) - 1)
+default_text = _pick_column(columns, ["评论内容", "评论", "评价", "内容", "review", "comment", "text"], 0)
+default_rating = _pick_column(columns, ["评分", "星级", "rating", "score", "stars"], min(1, len(columns) - 1))
 left, right = st.columns(2)
 with left:
     text_column = st.selectbox("评论内容列", columns, index=default_text)
@@ -180,7 +221,7 @@ with tab_overview:
         st.write(f"- {suggestion}")
 
 with tab_report:
-    signature = json.dumps({k: result[k] for k in ("total", "positive", "negative", "neutral", "keywords", "positive_reasons", "negative_reasons")}, ensure_ascii=False, sort_keys=True)
+    signature = json.dumps({k: result[k] for k in ("total", "positive", "negative", "neutral", "keywords", "positive_reasons", "negative_reasons", "issue_evidence", "selling_point_evidence")}, ensure_ascii=False, sort_keys=True)
     if st.session_state.get("report_signature") != signature:
         try:
             st.session_state["business_report"] = generate_ai_business_report(result)
@@ -193,6 +234,28 @@ with tab_report:
     status = st.session_state["report_status"]
     st.subheader("AI 商家诊断报告")
     st.caption(f"报告状态：{status} · 已限制发送给模型的评论样本数量，以控制调用成本")
+    issue_evidence = result.get("issue_evidence", [])
+    selling_evidence = result.get("selling_point_evidence", [])
+    evidence_review_count = len(set(
+        quote for item in issue_evidence + selling_evidence for quote in item.get("evidence", [])
+    ))
+    covered_issues = len(issue_evidence)
+    issue_coverage = sum(item["negative_count"] for item in issue_evidence) / result["negative"] * 100 if result["negative"] else None
+    st.markdown(
+        f'<div class="evidence-basis"><h4>本次诊断依据</h4>'
+        f'<div>分析评论：{result["total"]} 条　好评：{result["positive"]} 条　中评：{result["neutral"]} 条　差评：{result["negative"]} 条</div>'
+        f'<div>AI 实际分析样本：{evidence_review_count} 条　主要问题覆盖：{_percent(issue_coverage)}</div>'
+        '<div class="basis-note">AI 负责归纳、解释和经营建议；数量、比例等关键指标由程序根据上传数据计算。</div></div>',
+        unsafe_allow_html=True,
+    )
+    if issue_evidence:
+        st.markdown("#### 核心问题数据证据")
+        for item in issue_evidence[:5]:
+            st.markdown(_evidence_card(item), unsafe_allow_html=True)
+    if selling_evidence:
+        st.markdown("#### 消费者认可卖点数据证据")
+        for item in selling_evidence[:5]:
+            st.markdown(_evidence_card(item, is_issue=False), unsafe_allow_html=True)
     report_items = list(business_report.items())
     for row_start in range(0, len(report_items), 2):
         card_cols = st.columns(2)
@@ -204,8 +267,27 @@ with tab_report:
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report_lines = [
         "# AI 商家诊断报告", "", f"报告状态：{status}", f"生成时间：{generated_at}",
-        f"评论总数：{result['total']}", f"好评率：{positive_rate:.1f}%", f"差评率：{negative_rate:.1f}%", "",
+        f"评论总数：{result['total']}", f"好评率：{positive_rate:.1f}%", f"差评率：{negative_rate:.1f}%",
+        f"中评数：{result['neutral']}", f"AI 实际分析样本：{evidence_review_count}", f"主要问题覆盖：{_percent(issue_coverage)}", "",
     ]
+    if issue_evidence:
+        report_lines.extend(["## 核心问题数据证据", ""])
+        for item in issue_evidence[:5]:
+            report_lines.extend([
+                f"### {item['issue_name']}",
+                f"涉及评论：{item['mention_count']} 条；负面评论：{item['negative_count']} 条；占差评：{_percent(item['negative_share'])}",
+                f"严重程度：{item['severity']}", f"商业影响：{item['commercial_impact']}",
+                f"建议动作：{item['recommended_action']}", f"优先原因：{item['reason']}",
+                "代表性评论：", format_report_markdown(item.get("evidence", [])), "",
+            ])
+    if selling_evidence:
+        report_lines.extend(["## 消费者认可卖点数据证据", ""])
+        for item in selling_evidence[:5]:
+            report_lines.extend([
+                f"### {item['point_name']}",
+                f"提及次数：{item['mention_count']} 次；正面评论：{item['positive_count']} 条；占好评：{_percent(item['positive_share'])}",
+                "代表性评论：", format_report_markdown(item.get("evidence", [])), "",
+            ])
     for title, content in business_report.items():
         report_lines.extend([f"## {title}", "", format_report_markdown(content), ""])
     report_markdown = "\n".join(report_lines)
