@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from analyzer import analyze_reviews
+from analyzer import analyze_reviews, generate_ai_business_report, generate_business_report
 
 
 st.set_page_config(page_title="AI 电商评论分析器", page_icon="📊", layout="wide")
@@ -81,3 +81,15 @@ else:
 
 with st.expander("查看已读取的评论数据"):
     st.dataframe(df, hide_index=True, use_container_width=True)
+
+st.divider()
+st.subheader("AI 商家诊断报告")
+try:
+    business_report = generate_ai_business_report(result)
+    st.success("报告状态：AI 生成")
+except Exception as exc:
+    business_report = generate_business_report(result)
+    st.info(f"报告状态：规则版降级结果（AI 暂不可用：{exc}）")
+for title, content in business_report.items():
+    st.markdown(f"**{title}**")
+    st.write(content)

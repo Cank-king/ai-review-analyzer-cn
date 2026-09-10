@@ -1,7 +1,11 @@
 """AI 电商评论分析器的核心分析函数。"""
 
 import re
+import json
+import os
+from pathlib import Path
 from collections import Counter
+from urllib import error, request
 
 import jieba
 import pandas as pd
@@ -109,3 +113,161 @@ def generate_suggestions(negative_reasons):
         "价格不满意": "重新评估定价与促销策略，突出产品价值并提供合理优惠。",
     }
     return [suggestions[reason] for reason, _ in sorted(negative_reasons, key=lambda x: x[1], reverse=True)]
+
+
+def generate_business_report(result):
+    """根据评论分析结果生成规则版商家诊断报告。
+
+    这是预留给后续真实 AI 接口的占位函数；当前只使用已有统计结果和规则生成文本。
+    """
+    positive_reasons = sorted(result.get("positive_reasons", []), key=lambda item: item[1], reverse=True)
+    negative_reasons = sorted(result.get("negative_reasons", []), key=lambda item: item[1], reverse=True)
+    suggestions = result.get("suggestions", [])
+    keywords = result.get("keywords", [])
+    total = int(result.get("total", 0))
+    positive = int(result.get("positive", 0))
+    negative = int(result.get("negative", 0))
+
+    if negative_reasons:
+        focus = "、".join(reason for reason, _ in negative_reasons[:3])
+        consumer_focus = f"消费者最关注的问题集中在：{focus}。"
+    else:
+        consumer_focus = "暂未发现集中出现的负面问题，可继续积累评论观察趋势。"
+
+    if positive_reasons:
+        selling_points = "、".join(reason for reason, _ in positive_reasons[:3])
+        best_selling_point = f"最值得宣传的卖点是：{selling_points}。"
+    elif keywords:
+        best_selling_point = f"评论中较常出现的关注点是：{ '、'.join(word for word, _ in keywords[:3]) }，建议进一步验证其宣传价值。"
+    else:
+        best_selling_point = "暂未提取到明确卖点，建议继续收集更具体的使用体验。"
+
+    if suggestions:
+        urgent_improvement = "最急需改进的事项是：" + "；".join(suggestions[:3])
+    else:
+        urgent_improvement = "当前没有明显的优先改进事项，可继续关注新评论。"
+
+    if total:
+        positive_rate = positive / total * 100
+        negative_rate = negative / total * 100
+        summary = (
+            f"本次共分析 {total} 条评论，好评 {positive} 条（{positive_rate:.1f}%），"
+            f"差评 {negative} 条（{negative_rate:.1f}%）。"
+            "建议优先处理高频差评原因，同时放大稳定出现的正面体验。"
+        )
+    else:
+        summary = "当前没有可供分析的评论，暂时无法形成商家总结。"
+
+    return {
+        "消费者最关注的问题": consumer_focus,
+        "最值得宣传的卖点": best_selling_point,
+        "最急需改进的事项": urgent_improvement,
+        "商家总结": summary,
+    }
+
+
+REPORT_SECTIONS = (
+    "消费者最关注的问题",
+    "最值得宣传的卖点",
+    "最急需改进的事项",
+    "商家总结",
+)
+
+
+def _load_dashscope_api_key():
+    """优先读取环境变量；若不存在，再读取项目根目录 .env。"""
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    if api_key:
+        return api_key.strip()
+    env_path = Path(__file__).with_name(".env")
+    if not env_path.exists():
+        return ""
+    for line in env_path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name.strip() == "DASHSCOPE_API_KEY":
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
+def _report_input(result, max_reviews=80):
+    """整理发送给模型的统计和评论，限制评论数量以控制成本。"""
+    data = result.get("data")
+    reviews = []
+    if data is not None:
+        text_column = next((column for column in data.columns if column not in {"_评分", "_分类"}), None)
+        if text_column:
+            reviews = [str(text) for text in data[text_column].dropna().tolist() if str(text).strip()][:max_reviews]
+    return {
+        "统计": {
+            "评论总数": result.get("total", 0),
+            "好评数": result.get("positive", 0),
+            "差评数": result.get("negative", 0),
+            "中性评论数": result.get("neutral", 0),
+            "高频关键词": result.get("keywords", []),
+            "好评原因": result.get("positive_reasons", []),
+            "差评原因": result.get("negative_reasons", []),
+        },
+        "评论样本": reviews,
+    }
+
+
+def _parse_report_response(content):
+    """解析模型返回的 JSON，并确保四个报告部分都存在。"""
+    content = content.strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        content = fenced.group(1).strip()
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise ValueError("模型返回格式不是对象")
+    report = {section: str(parsed.get(section, "")).strip() for section in REPORT_SECTIONS}
+    if any(not value for value in report.values()):
+        raise ValueError("模型返回缺少报告内容")
+    return report
+
+
+def generate_ai_business_report(result, model="qwen-turbo", timeout=30):
+    """调用 DashScope OpenAI 兼容接口生成商家诊断报告。
+
+    失败时抛出异常，由页面层自动降级到 generate_business_report()。
+    """
+    api_key = _load_dashscope_api_key()
+    if not api_key:
+        raise RuntimeError("未找到 DASHSCOPE_API_KEY")
+
+    system_prompt = (
+        "你是中文电商运营分析师。请根据评论统计和评论样本，生成简洁、具体、可执行的商家诊断报告。"
+        "只返回一个合法 JSON 对象，不要 Markdown，不要额外说明。对象必须包含四个键："
+        "消费者最关注的问题、最值得宣传的卖点、最急需改进的事项、商家总结。"
+        "每个值使用简体中文完整句子，避免编造统计中没有的信息。"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(_report_input(result), ensure_ascii=False)},
+        ],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    api_request = request.Request(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(api_request, timeout=timeout) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"DashScope API 调用失败：{exc}") from exc
+
+    try:
+        content = response_data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("DashScope API 返回内容不完整") from exc
+    return _parse_report_response(content)
