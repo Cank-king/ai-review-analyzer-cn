@@ -11,7 +11,18 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from analyzer import analyze_reviews, generate_ai_business_report, generate_business_report
+from analyzer import (
+    MAX_CSV_BYTES,
+    MAX_REVIEW_ROWS,
+    MAX_AI_EVIDENCE,
+    RATING_COLUMN_ALIASES,
+    TEXT_COLUMN_ALIASES,
+    analyze_reviews,
+    calculate_health_score,
+    generate_ai_business_report,
+    generate_business_report,
+    read_reviews_csv,
+)
 from pdf_report import build_pdf_report
 
 
@@ -108,7 +119,8 @@ def _percent(value):
 def _evidence_card(item, is_issue=True):
     if is_issue:
         title = item["issue_name"]
-        metrics = f"涉及评论：{item['mention_count']} 条 · 负面评论：{item['negative_count']} 条 · 占差评：{_percent(item['negative_share'])}"
+        priority = f" · 优先级：{item.get('priority_label', '🟢 P3 低')} / {item.get('priority_score', 0)}分"
+        metrics = f"涉及评论：{item['mention_count']} 条 · 负面评论：{item['negative_count']} 条 · 占差评：{_percent(item['negative_share'])}{priority}"
         details = (
             f"严重程度：{item['severity']}<br>"
             f"商业影响：{html.escape(item['commercial_impact'])}<br>"
@@ -154,16 +166,24 @@ with st.sidebar:
     st.header("数据设置")
     uploaded_file = st.file_uploader("上传评论 CSV", type=["csv"], help="建议包含评论内容和评分两列。")
     st.caption("支持中文 CSV；页面不会展示或上传你的 API Key。")
+    st.caption(f"单文件限制：{MAX_CSV_BYTES // (1024 * 1024)} MB，最多 {MAX_REVIEW_ROWS:,} 条评论。")
 
 if uploaded_file is not None:
     try:
-        df = pd.read_csv(uploaded_file)
+        if uploaded_file.size and uploaded_file.size > MAX_CSV_BYTES:
+            raise ValueError(f"CSV 文件超过 {MAX_CSV_BYTES // (1024 * 1024)} MB 限制，请拆分文件后重试。")
+        df = read_reviews_csv(uploaded_file)
         st.success(f"已加载 {len(df):,} 条评论")
-    except Exception as exc:
-        st.error(f"CSV 读取失败：{exc}")
+    except ValueError as exc:
+        st.error(f"CSV 无法分析：{exc}")
+        st.info("请确认文件包含评论内容列和评分列，并另存为 UTF-8 或 GB18030 编码的 CSV。")
+        st.stop()
+    except Exception:
+        st.error("CSV 读取失败，请检查文件是否损坏或格式是否为标准 CSV。")
+        st.info("建议使用表格软件重新导出为 CSV（UTF-8）。")
         st.stop()
 else:
-    df = pd.read_csv(Path(__file__).with_name("sample_reviews.csv"))
+    df = read_reviews_csv(Path(__file__).with_name("sample_reviews.csv"))
     st.info("当前使用示例数据演示；从左侧上传 CSV 可分析自己的评论。")
 
 if df.empty:
@@ -171,13 +191,24 @@ if df.empty:
     st.stop()
 
 columns = list(df.columns)
-default_text = _pick_column(columns, ["评论内容", "评论", "评价", "内容", "review", "comment", "text"], 0)
-default_rating = _pick_column(columns, ["评分", "星级", "rating", "score", "stars"], min(1, len(columns) - 1))
+if len(columns) < 2:
+    st.error("CSV 至少需要两列：一列评论内容和一列评分。")
+    st.info("请补充评论内容列与评分列后重新上传。")
+    st.stop()
+default_text = _pick_column(columns, TEXT_COLUMN_ALIASES, 0)
+default_rating = _pick_column(columns, RATING_COLUMN_ALIASES, min(1, len(columns) - 1))
+if default_text == default_rating:
+    default_rating = 1 if len(columns) > 1 else 0
 left, right = st.columns(2)
 with left:
     text_column = st.selectbox("评论内容列", columns, index=default_text)
 with right:
     rating_column = st.selectbox("评分列", columns, index=default_rating)
+
+if text_column == rating_column:
+    st.error("评论内容列和评分列不能是同一列，请分别选择对应列。")
+    st.info("评论列应包含文字，评分列应包含 1～5 星评分。")
+    st.stop()
 
 try:
     result = analyze_reviews(df, text_column, rating_column)
@@ -222,26 +253,43 @@ with tab_overview:
         st.write(f"- {suggestion}")
 
 with tab_report:
-    signature = json.dumps({k: result[k] for k in ("total", "positive", "negative", "neutral", "keywords", "positive_reasons", "negative_reasons", "issue_evidence", "selling_point_evidence")}, ensure_ascii=False, sort_keys=True)
-    if st.session_state.get("report_signature") != signature:
+    signature = json.dumps({k: result[k] for k in ("total", "positive", "negative", "neutral", "keywords", "positive_reasons", "negative_reasons", "issue_evidence", "selling_point_evidence", "health_score", "issue_priorities", "weekly_actions")}, ensure_ascii=False, sort_keys=True)
+    regenerate = st.button("重新生成 AI 诊断报告", help="只有点击此按钮或更换数据时才会重新调用 AI。")
+    if st.session_state.get("report_signature") != signature or regenerate:
         try:
-            st.session_state["business_report"] = generate_ai_business_report(result)
+            try:
+                streamlit_secrets = st.secrets
+            except Exception:
+                streamlit_secrets = None
+            st.session_state["business_report"] = generate_ai_business_report(result, secrets=streamlit_secrets)
             st.session_state["report_status"] = "AI 生成"
-        except Exception as exc:
+        except Exception:
             st.session_state["business_report"] = generate_business_report(result)
-            st.session_state["report_status"] = f"规则版降级（AI 暂不可用：{exc}）"
+            st.session_state["report_status"] = "规则版降级（AI 暂不可用）"
         st.session_state["report_signature"] = signature
     business_report = st.session_state["business_report"]
     status = st.session_state["report_status"]
     st.subheader("AI 商家诊断报告")
     st.caption(f"报告状态：{status} · 已限制发送给模型的评论样本数量，以控制调用成本")
-    issue_evidence = result.get("issue_evidence", [])
+    issue_evidence = result.get("issue_priorities") or result.get("issue_evidence", [])
     selling_evidence = result.get("selling_point_evidence", [])
-    evidence_review_count = len(set(
+    evidence_review_count = min(MAX_AI_EVIDENCE, len(set(
         quote for item in issue_evidence + selling_evidence for quote in item.get("evidence", [])
-    ))
+    )))
     covered_issues = len(issue_evidence)
     issue_coverage = result.get("issue_coverage_count", 0) / result["negative"] * 100 if result["negative"] else None
+    health = result.get("health_detail") or calculate_health_score(result)
+    priorities = result.get("issue_priorities", [])
+    top_issue = priorities[0] if priorities else None
+    first_action = (result.get("weekly_actions") or [{}])[0]
+    overview_html = (
+        '<div class="evidence-basis"><h4>经营概览</h4>'
+        f'<div><strong>经营健康度：{health["score"]} / 100</strong>　评级：{html.escape(health["level"])}</div>'
+        f'<div>最严重问题：{html.escape(top_issue["issue_name"] if top_issue else "暂无明确问题")}　'
+        f'最高优先级：{html.escape(top_issue.get("priority_label", "暂无") if top_issue else "暂无")}</div>'
+        f'<div>本周首要任务：{html.escape(first_action.get("问题", "继续收集评论证据"))}</div></div>'
+    )
+    st.markdown(overview_html, unsafe_allow_html=True)
     st.markdown(
         f'<div class="evidence-basis"><h4>本次诊断依据</h4>'
         f'<div>分析评论：{result["total"]} 条　好评：{result["positive"]} 条　中评：{result["neutral"]} 条　差评：{result["negative"]} 条</div>'
@@ -257,6 +305,15 @@ with tab_report:
         st.markdown("#### 消费者认可卖点数据证据")
         for item in selling_evidence[:5]:
             st.markdown(_evidence_card(item, is_issue=False), unsafe_allow_html=True)
+    weekly_actions = result.get("weekly_actions", [])
+    if weekly_actions:
+        st.markdown("#### 本周最应该做的 3 件事")
+        for index, action in enumerate(weekly_actions[:3], 1):
+            action_text = "\n".join(f"{key}：{value}" for key, value in action.items() if key != "代表性评论")
+            st.markdown(
+                f'<div class="evidence-card"><h5>{index}. {html.escape(str(action.get("问题", "行动事项")))}</h5>'
+                f'<div>{format_report_content(action_text)}</div></div>', unsafe_allow_html=True
+            )
     report_items = list(business_report.items())
     for row_start in range(0, len(report_items), 2):
         card_cols = st.columns(2)
@@ -269,6 +326,7 @@ with tab_report:
     report_lines = [
         "# AI 商家诊断报告", "", f"报告状态：{status}", f"生成时间：{generated_at}",
         f"评论总数：{result['total']}", f"好评率：{positive_rate:.1f}%", f"差评率：{negative_rate:.1f}%",
+        f"经营健康度：{health['score']}/100（{health['level']}）",
         f"中评数：{result['neutral']}", f"AI 实际分析样本：{evidence_review_count}", f"主要问题覆盖：{_percent(issue_coverage)}", "",
     ]
     if issue_evidence:
@@ -278,9 +336,14 @@ with tab_report:
                 f"### {item['issue_name']}",
                 f"涉及评论：{item['mention_count']} 条；负面评论：{item['negative_count']} 条；占差评：{_percent(item['negative_share'])}",
                 f"严重程度：{item['severity']}", f"商业影响：{item['commercial_impact']}",
+                f"优先级：{item.get('priority_label', '🟢 P3 低')} / {item.get('priority_score', 0)}分",
                 f"建议动作：{item['recommended_action']}", f"优先原因：{item['reason']}",
                 "代表性评论：", format_report_markdown(item.get("evidence", [])), "",
             ])
+    if weekly_actions:
+        report_lines.extend(["## 本周最应该做的 3 件事", ""])
+        for index, action in enumerate(weekly_actions[:3], 1):
+            report_lines.extend([f"### {index}. {action.get('问题', '行动事项')}", format_report_markdown({k: v for k, v in action.items() if k != '代表性评论'}), ""])
     if selling_evidence:
         report_lines.extend(["## 消费者认可卖点数据证据", ""])
         for item in selling_evidence[:5]:

@@ -81,10 +81,13 @@ def build_pdf_report(result, business_report, report_status="规则版降级", g
     negative = int(result.get("negative", 0))
     positive_rate = positive / total * 100 if total else 0
     negative_rate = negative / total * 100 if total else 0
-    issue_evidence = result.get("issue_evidence", [])
+    issue_evidence = result.get("issue_priorities") or result.get("issue_evidence", [])
     selling_evidence = result.get("selling_point_evidence", [])
-    evidence_count = len(set(quote for item in issue_evidence + selling_evidence for quote in item.get("evidence", [])))
+    evidence_count = min(40, len(set(quote for item in issue_evidence + selling_evidence for quote in item.get("evidence", []))))
     issue_coverage = result.get("issue_coverage_count", 0) / negative * 100 if negative else None
+    health = result.get("health_detail") or {"score": result.get("health_score", 0), "level": result.get("health_level", "高风险")}
+    priorities = result.get("issue_priorities", [])
+    weekly_actions = result.get("weekly_actions", [])
 
     styles = getSampleStyleSheet()
     title = ParagraphStyle("CoverTitle", parent=styles["Title"], fontName=font_name, fontSize=25, leading=34, alignment=TA_CENTER, textColor=colors.HexColor("#17324D"), spaceAfter=18)
@@ -99,6 +102,7 @@ def build_pdf_report(result, business_report, report_status="规则版降级", g
     story.extend([
         _paragraph(f"评论总数：{total} 条", subtitle),
         _paragraph(f"好评率：{positive_rate:.1f}%　差评率：{negative_rate:.1f}%", subtitle),
+        _paragraph(f"经营健康度：{health.get('score', 0)} / 100　评级：{health.get('level', '高风险')}", subtitle),
         _paragraph(f"报告状态：{report_status}", subtitle),
         PageBreak(),
         _paragraph("本次诊断依据", h1),
@@ -106,6 +110,7 @@ def build_pdf_report(result, business_report, report_status="规则版降级", g
         _paragraph(f"好评：{positive} 条　中评：{neutral} 条　差评：{negative} 条", body),
         _paragraph(f"AI 实际分析样本：{evidence_count} 条", body),
         _paragraph(f"主要问题覆盖率：{('样本不足' if issue_coverage is None else f'{issue_coverage:.1f}%')}", body),
+        _paragraph(f"最高优先级：{priorities[0].get('priority_label', '暂无') if priorities else '暂无'}", body),
         _paragraph("说明：统计数字由程序根据上传数据计算，AI 负责解释和经营建议。", small),
         Spacer(1, 5 * mm),
         _paragraph("执行摘要", h1),
@@ -114,11 +119,13 @@ def build_pdf_report(result, business_report, report_status="规则版降级", g
 
     if issue_evidence:
         story.append(_paragraph("核心问题 TOP 5", h1))
+        evidence_by_name = {item.get("issue_name"): item for item in priorities}
         for index, item in enumerate(issue_evidence[:5], 1):
+            priority_item = evidence_by_name.get(item.get("issue_name"), item)
             story.append(_paragraph(f"{index}. {item.get('issue_name', '未命名问题')}", h2))
             share = "样本不足" if item.get("negative_share") is None else f"{item['negative_share']:.1f}%"
             story.append(_paragraph(f"涉及评论数：{item.get('mention_count', 0)} 条　负面评论数：{item.get('negative_count', 0)} 条　占全部差评比例：{share}", label))
-            story.append(_paragraph(f"严重程度：{item.get('severity', '样本不足')}　商业影响：{item.get('commercial_impact', '暂无')}", label))
+            story.append(_paragraph(f"严重程度：{item.get('severity', '样本不足')}　优先级：{priority_item.get('priority_label', '🟢 P3 低')} / {priority_item.get('priority_score', 0)}分　商业影响：{item.get('commercial_impact', '暂无')}", label))
             story.append(_paragraph(f"建议动作：{item.get('recommended_action', '暂无')}", label))
             story.append(_paragraph(f"代表性真实评论：{_plain_content(item.get('evidence', []))}", small))
     if selling_evidence:
@@ -129,6 +136,12 @@ def build_pdf_report(result, business_report, report_status="规则版降级", g
             story.append(_paragraph(f"提及次数：{item.get('mention_count', 0)} 次　正面评论数量：{item.get('positive_count', 0)} 条　占全部好评比例：{share}", label))
             story.append(_paragraph(f"代表性真实评论：{_plain_content(item.get('evidence', []))}", small))
 
+    if weekly_actions:
+        story.append(_paragraph("本周最应该做的 3 件事", h1))
+        for index, action in enumerate(weekly_actions[:3], 1):
+            story.append(_paragraph(f"{index}. {action.get('问题', '行动事项')}", h2))
+            story.append(_paragraph(_plain_content({key: value for key, value in action.items() if key != "代表性评论"}), body))
+            story.append(_paragraph(f"代表性评论：{_plain_content(action.get('代表性评论', []))}", small))
     for section in ("优先整改事项 TOP 3", "运营/营销建议", "客服/售后建议", "产品优化建议", "30 天行动清单", "商家总结"):
         story.append(_paragraph(section, h1))
         story.append(_paragraph(_plain_content(business_report.get(section, "暂无内容")), body))
