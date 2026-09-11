@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from analyzer import analyze_reviews, generate_ai_business_report, generate_business_report
+from pdf_report import build_pdf_report
 
 
 REPORT_LABELS = ("问题", "严重程度", "建议动作", "优先原因", "为什么优先处理")
@@ -240,7 +241,7 @@ with tab_report:
         quote for item in issue_evidence + selling_evidence for quote in item.get("evidence", [])
     ))
     covered_issues = len(issue_evidence)
-    issue_coverage = sum(item["negative_count"] for item in issue_evidence) / result["negative"] * 100 if result["negative"] else None
+    issue_coverage = result.get("issue_coverage_count", 0) / result["negative"] * 100 if result["negative"] else None
     st.markdown(
         f'<div class="evidence-basis"><h4>本次诊断依据</h4>'
         f'<div>分析评论：{result["total"]} 条　好评：{result["positive"]} 条　中评：{result["neutral"]} 条　差评：{result["negative"]} 条</div>'
@@ -296,7 +297,8 @@ with tab_report:
         columns=["报告模块", "诊断内容"],
     )
     classified_csv = result["data"].to_csv(index=False).encode("utf-8-sig")
-    download_cols = st.columns(3)
+    pdf_bytes = build_pdf_report(result, business_report, status, generated_at)
+    download_cols = st.columns(4)
     with download_cols[0]:
         st.download_button("下载完整诊断报告（Markdown）", report_markdown.encode("utf-8"), "merchant_review_report.md", "text/markdown", width="stretch")
     with download_cols[1]:
@@ -305,6 +307,14 @@ with tab_report:
         source_bytes = io.BytesIO()
         df.to_csv(source_bytes, index=False)
         st.download_button("下载原始评论（含分类）", classified_csv, "merchant_review_classified_reviews.csv", "text/csv", width="stretch")
+    with download_cols[3]:
+        st.download_button(
+            "📄 下载 PDF 诊断报告",
+            pdf_bytes,
+            f"merchant_review_diagnosis_{datetime.now():%Y%m%d}.pdf",
+            "application/pdf",
+            width="stretch",
+        )
 
 with tab_data:
     st.caption(f"当前读取 {len(df):,} 条评论；仅在本页面内用于分析。")

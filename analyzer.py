@@ -84,6 +84,7 @@ def analyze_reviews(df, text_column, rating_column, top_n=15):
     negative_text = " ".join(data.loc[data["_分类"] == "差评", text_column])
     positive_reasons = find_reasons(positive_text, POSITIVE_RULES)
     negative_reasons = find_reasons(negative_text, NEGATIVE_RULES)
+    issue_evidence = build_issue_evidence(data, text_column, negative_reasons)
     return {
         "data": data,
         "text_column": text_column,
@@ -96,7 +97,8 @@ def analyze_reviews(df, text_column, rating_column, top_n=15):
         "positive_reasons": positive_reasons,
         "negative_reasons": negative_reasons,
         "suggestions": generate_suggestions(negative_reasons),
-        "issue_evidence": build_issue_evidence(data, text_column, negative_reasons),
+        "issue_evidence": issue_evidence,
+        "issue_coverage_count": _calculate_issue_coverage(data, text_column, negative_reasons),
         "selling_point_evidence": build_selling_point_evidence(data, text_column, positive_reasons),
     }
 
@@ -129,6 +131,15 @@ def _evidence_rows(data, text_column, words, category):
     rows = data.loc[mask]
     category_rows = rows.loc[rows["_分类"] == category]
     return rows, category_rows
+
+
+def _calculate_issue_coverage(data, text_column, negative_reasons):
+    """计算至少命中一个主要问题标签的差评数量，按评论去重。"""
+    covered = set()
+    for issue_name, _ in negative_reasons:
+        _, negative_rows = _evidence_rows(data, text_column, NEGATIVE_RULES[issue_name], "差评")
+        covered.update(negative_rows.index.tolist())
+    return len(covered)
 
 
 def _severity(negative_count, negative_total, mention_count):
